@@ -30,7 +30,6 @@ public class Server {
         }
     }
 
-
     private void handleConnection(Socket socket) {
         try (
                 InputStream inputStream = socket.getInputStream();
@@ -39,21 +38,7 @@ public class Server {
             logger.info("Запрос получен: " + request.getMethod() + " " + request.getPath());
 
 
-            Map<String, Handler> methodHandlers = handlers.get(request.getMethod());
-            if (methodHandlers != null) {
-                Handler handler = methodHandlers.get(request.getPath());
-                if (handler != null) {
-                    handler.handle(request, responseStream);
-                    logger.info("Ответ отправлен для:  " + request.getMethod() + " " + request.getPath());
-                } else {
-                    logger.warning("Handler not found for: " + request.getMethod() + " " + request.getPath());
-                    responseStream.write("404 Not Found".getBytes());
-                }
-            } else {
-                logger.warning("Method not allowed: " + request.getMethod());
-                responseStream.write("405 Method Not Allowed".getBytes());
-            }
-            responseStream.flush();
+            handleRequest(request, responseStream);
         } catch (Exception e) {
             e.printStackTrace();
             logger.log(Level.SEVERE, "Error while handling connection", e);
@@ -69,7 +54,29 @@ public class Server {
             } catch (IOException e) {
                 logger.log(Level.SEVERE, "Ошибка закрытия соединения", e);
             }
+
         }
+    }
+
+    public void handleRequest(Request request, BufferedOutputStream responseStream) throws IOException {
+        String method = request.getMethod();
+        String path = request.getPath().split("\\?")[0];
+
+        Map<String, Handler> methodHandlers = handlers.get(method);
+        if (methodHandlers != null) {
+            Handler handler = methodHandlers.get(path);
+            if (handler != null) {
+                handler.handle(request, responseStream);
+                logger.info("Ответ отправлен для:  " + method + " " + path);
+            } else {
+                logger.warning("Handler not found for: " + method + " " + path);
+                sendResponse(responseStream, "404 Not Found", "text/plain", 404);
+            }
+        } else {
+            logger.warning("Method not allowed: " + method);
+            sendResponse(responseStream, "405 Method Not Allowed", "text/plain", 405);
+        }
+        responseStream.flush();
     }
 
     protected void sendResponse(OutputStream outputStream, String message, String contentType, int statusCode) throws IOException {
