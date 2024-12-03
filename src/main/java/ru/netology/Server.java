@@ -2,40 +2,135 @@ package ru.netology;
 
 import java.io.*;
 import java.net.ServerSocket;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.net.Socket;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class Server {
-    private final int port;
-    private final List<String> validPaths = List.of(
-            "/index.html", "/spring.svg", "/spring.png", "/resources.html",
-            "/styles.css", "/app.js", "/links.html", "/forms.html",
-            "/classic.html", "/events.html", "/events.js"
-    );
-
-    private final ExecutorService executor;
     private static final Logger logger = Logger.getLogger(Server.class.getName());
+    private final Map<String, Map<String, Handler>> handlers = new ConcurrentHashMap<>();
 
-    public Server(int port) {
-        this.port = port;
-        this.executor = Executors.newFixedThreadPool(64);
+    public void addHandler(String method, String path, Handler handler) {
+        handlers.computeIfAbsent(method, k -> new ConcurrentHashMap<>()).put(path, handler);
     }
 
-    public void start() {
-        try (var serverSocket = new ServerSocket(port)) {
-            System.out.println("Server started on port: " + port);
+    public void listen(int port) {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            logger.info("Сервер запущен на порту " + port);
             while (true) {
-                var socket = serverSocket.accept();
-                executor.submit(new ConnectionHandler(socket, validPaths));
+                Socket socket = serverSocket.accept();
+                logger.info("Новое соеднение доступно: " + socket.getInetAddress() + ":" + socket.getPort());
+                new Thread(() -> handleConnection(socket)).start();
             }
         } catch (IOException e) {
-            logger.log(Level.SEVERE, "Server exception: ", e);
+            logger.log(Level.SEVERE, "Error while starting server", e);
             e.printStackTrace();
-        } finally {
-            executor.shutdown();
         }
+    }
+
+    private void handleConnection(Socket socket) {
+        try (
+                InputStream inputStream = socket.getInputStream();
+                BufferedOutputStream responseStream = new BufferedOutputStream(socket.getOutputStream())) {
+            Request request = parseRequest(inputStream);
+            logger.info("Запрос получен: " + request.getMethod() + " " + request.getPath());
+
+
+            handleRequest(request, responseStream);
+        } catch (Exception e) {
+            e.printStackTrace();
+            logger.log(Level.SEVERE, "Error while handling connection", e);
+            try {
+                socket.getOutputStream().write("500 Internal Server Error".getBytes());
+            } catch (IOException ioException) {
+                ioException.printStackTrace();
+            }
+        } finally {
+            try {
+                socket.close();
+                logger.info("Соеднинение закрыто: " + socket.getInetAddress() + ":" + socket.getPort());
+            } catch (IOException e) {
+                logger.log(Level.SEVERE, "Ошибка закрытия соединения", e);
+            }
+
+        }
+    }
+
+    public void handleRequest(Request request, BufferedOutputStream responseStream) throws IOException {
+        String method = request.getMethod();
+        String path = request.getPath().split("\\?")[0];
+
+        Map<String, Handler> methodHandlers = handlers.get(method);
+        if (methodHandlers != null) {
+            Handler handler = methodHandlers.get(path);
+            if (handler != null) {
+                handler.handle(request, responseStream);
+                logger.info("Ответ отправлен для:  " + method + " " + path);
+            } else {
+                logger.warning("Handler not found for: " + method + " " + path);
+                sendResponse(responseStream, "404 Not Found", "text/plain", 404);
+            }
+        } else {
+            logger.warning("Method not allowed: " + method);
+            sendResponse(responseStream, "405 Method Not Allowed", "text/plain", 405);
+        }
+        responseStream.flush();
+    }
+
+    protected void sendResponse(OutputStream outputStream, String message, String contentType, int statusCode) throws IOException {
+        String statusLine = "HTTP/1.1 " + statusCode + " " + getStatusMessage(statusCode) + "\r\n";
+        outputStream.write(statusLine.getBytes());
+        outputStream.write(("Content-Type: " + contentType + "\r\n").getBytes());
+        outputStream.write(("Content-Length: " + message.length() + "\r\n").getBytes());
+        outputStream.write("\r\n".getBytes());
+        outputStream.write(message.getBytes());
+        outputStream.flush();
+    }
+
+    private String getStatusMessage(int statusCode) {
+        switch (statusCode) {
+            case 200:
+                return "OK";
+            case 404:
+                return "Not Found";
+            case 405:
+                return "Method Not Allowed";
+            case 500:
+                return "Internal Server Error";
+            default:
+                return "Unknown";
+        }
+    }
+
+    private Request parseRequest(InputStream inputStream) throws Exception {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
+
+        String requestLine = reader.readLine();
+        if (requestLine == null || requestLine.isEmpty()) {
+            throw new Exception("Invalid HTTP request");
+        }
+
+        String[] requestParts = requestLine.split(" ");
+        if (requestParts.length < 2) {
+            throw new Exception("Invalid HTTP request line");
+        }
+
+        String method = requestParts[0];
+        String path = requestParts[1];
+
+        Map<String, String> headers = new ConcurrentHashMap<>();
+        String line;
+        while (!(line = reader.readLine()).isEmpty()) {
+            String[] headerParts = line.split(": ", 2);
+            if (headerParts.length == 2) {
+                headers.put(headerParts[0], headerParts[1]);
+            } else {
+                throw new Exception("Invalid header: " + line);
+            }
+        }
+
+        return new Request(method, path, headers, inputStream);
     }
 }
